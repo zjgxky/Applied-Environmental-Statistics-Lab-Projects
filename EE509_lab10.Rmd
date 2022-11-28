@@ -1,0 +1,495 @@
+---
+title: "Lab 10 - Hierarchical Bayes"
+author: "GE 509"
+output: html_document
+---
+
+The objective of this lab is to explore basic hierarchical models.  We will focus on the most common class of hierarchical models, which are linear mixed models.  Mixed models refer to models that include both hierarchical “random” effects and non-hierarchical “fixed” effects.  Everything that we apply below to linear models can also be applied to generalized linear models (e.g. logistic and poisson regression) and thus falls within the class of models referred to as GLMM (generalized linear mixed models) for which all of our traditional non-hierarchical linear and GLM exist as a special case.  While we have focused on random effects from the Bayesian perspective, special cases on GLMM can also be solved from the Maximum Likelihood perspective. However, it is much harder to generalize Maximum Likelihood random effects models if you need to relax additional assumptions or if you have a nonlinear model.
+
+# Case Study: Mosquito population size
+
+For this lab we will look at data on mosquito abundance.  The data file “Mosquito.csv” contains ten years worth of data for each of 5 replicate traps. We will begin with the simplest possible model to explain this data and incrementally add complexity.
+```{r}
+dat <- read.csv("data/Mosquito.csv",header=TRUE,as.is = TRUE)
+```
+
+
+### Lab Report Task 1: 
+
+1.  Plot mosquito abundance as a function of time in a way that distinguishes the reps (e.g. with lines, colors, or symbols)
+
+```{r}
+plot(density ~ time, dat = subset(dat, dat$rep == "rep1"), ylim = range(6.5,9),col = 1, type = 'l')
+lines(density ~ time, dat = subset(dat, dat$rep == "rep2"), col = 2, type = 'l')
+lines(density ~ time, dat = subset(dat, dat$rep == "rep3"), col = 3, type = 'l')
+lines(density ~ time, dat = subset(dat, dat$rep == "rep4"), col = 4, type = 'l')
+lines(density ~ time, dat = subset(dat, dat$rep == "rep5"), col = 5, type = 'l')
+legend(1995, 9, legend=c("rep 1", "rep 2", "rep 3", "rep 4", "rep 5"),
+       col=c(1,2,3,4,5), lty = 1, cex = 0.8)
+```
+
+#data for model:
+data <- list(x=dat$density, time=time, nt=length(unique(dat$time)),
+             nd=length(dat$density))
+2.	Fit a Bayesian model for the overall "global" mean `mu`, and precision `sigma`, reporting summary statistics for both. 
+
+```{r}
+library(rjags)
+library(coda)
+
+model_globalmu <- "
+model{
+
+  mu ~ dnorm(0, 0.001)  	## multivariate Normal prior on vector of regression params
+  S ~ dgamma(0.001,0.001)    ## prior precision
+
+  for(i in 1:n){
+	  y[i]  ~ dnorm(mu,S)		        ## data model
+  }
+}
+"
+
+data1 <- list(y = dat$density, n = length(dat$density))
+
+j.model1   <- jags.model (file = textConnection(model_globalmu),
+                             data = data1,
+                             n.chains = 3)
+
+jags.out   <- coda.samples (model = j.model1,
+                            variable.names = c("mu","S"),
+                                n.iter = 5000)
+
+plot(jags.out)
+gelman.diag(jags.out)
+GBR <- gelman.plot(jags.out) # cut 500
+```
+
+```{r}
+burnin = 500                               
+jags.burn <- window(jags.out,start=500) # low shrink factor initially, still cut first 500
+plot(jags.burn)
+summary(jags.burn)
+```
+
+
+3.	Add posterior CI and PI to the plot.
+```{r}
+out1 <- as.matrix(jags.burn)
+
+n = nrow(out1)
+xpred <- seq(min(dat$time),max(dat$time),length=50)
+npred <- length(xpred)
+ypred <- matrix(NA,nrow=n,ncol=npred)
+ycred <- matrix(NA,nrow=n,ncol=npred)
+
+for(g in 1:n){
+  Ey <- out1[g,"mu"] ## expected value of y
+  ycred[g,] <- Ey
+  ypred[g,] <- rnorm(npred,Ey,sqrt(1/out1[g,"S"]))
+}
+ci <- apply(ycred,2,quantile,c(0.025,0.5,0.975))
+pi <- apply(ypred,2,quantile,c(0.025,0.975))
+
+plot(dat$time,dat$density, ylim = c(6,9))
+lines(xpred,ci[2,],col=2,lwd=2)  ## median model
+lines(xpred,ci[1,],col=2,lty=1) ## model CI
+lines(xpred,ci[3,],col=2,lty=1)
+lines(xpred,pi[1,],col=3,lty=2) ## model PI
+lines(xpred,pi[2,],col=3,lty=2)
+```
+
+
+# Random time effect
+
+From the graphs in Task 1 it should be apparent that there is systematic year-to-year variability that is unexplained by just a simple mean.  Since at this point we don't know the cause of this variability we can begin by adding a random effect for year.  
+
+To add the random year effect:
+
+1. Add the random year effect to the process model.
+```
+   Ex[i] <- mu + alpha.t[time[i]]		## process model (varies with time but not rep)
+```
+Note that the version above is formatted slightly differently from the version covered in the lecture slides. In the lecture, the data were in a wide format, `x[t,b,i]`, where time, block, and individual were different dimensions in an array. Alternatively, one can format data in a long format, like we see in this file, with time and replicate as columns
+```{r}
+head(dat)
+```
+The variable `time` used in the code above is a vector of indices (length = nrow(dat)) matching a specific row of data to a specific `alpha.t`. Therefore, when building the `data` list that you pass into `jags.model` you'll want to add `time` and have that vector contain values in the range from 1 to 10 instead of 1995-2004. When working with long data, the easiest way to do this is to convert a column to a factor, then from a factor to an integrer
+```{r}
+index <- as.integer(as.factor(dat$time))
+index
+```
+
+2. Update the data model to reference `Ex[t]` instead of `mu`
+
+3. Add the random year effect parameter model (within a loop over time)
+```
+alpha.t[t] ~ dnorm(0,tau.t)		## random year effect
+```
+
+4. Add a prior on `tau.t`, the year-to-year variability
+
+### Lab Report Task 2
+
+4.  Fit the random-time model and turn in a plot like in Task 1 with the posterior CI and PI plotted against the data.
+Hint: once you convert the JAGS coda object to a matrix, you can use `grep` to figure out which columns contain alphas: 
+```
+jags.mat <- as.matrix(jags.out)
+sel.a <- grep("alpha",colnames(jags.mat))
+plot(jags.out[,sel.a])
+summary(jags.out[,sel.a])
+alpha <- jags.mat[,sel.a]
+apply(alpha,2,mean)
+```
+
+#data for model:
+data <- list(x=dat$density, time=time, nt=length(unique(dat$time)),
+             nd=length(dat$density))
+
+```{r}
+model_randomtime <- "
+model{
+  mu ~ dnorm(0, 0.01)
+  S ~ dgamma(0.01,0.01)    ## prior precision
+  for (t in 1:10) {alpha.t[t] ~ dnorm(0,tau.t)}
+  tau.t ~ dgamma(0.01,0.01)
+
+  for(i in 1:n){
+	  Ex[i] <- mu + alpha.t[index[i]]
+	  y[i]  ~ dnorm(Ex[i],S)		        ## data model
+  }
+}
+"
+
+data2 <- list(x = dat$time, y = dat$density, n = length(dat$density), index = index)
+
+j.model2   <- jags.model (file = textConnection(model_randomtime),
+                             data = data2,
+                             n.chains = 3)
+
+jags.out   <- coda.samples (model = j.model2,
+                            variable.names = c("mu","S", "alpha.t", "tau.t"),
+                                n.iter = 10000)
+
+plot(jags.out)
+gelman.diag(jags.out)
+GBR <- gelman.plot(jags.out) # cut first 6000
+```
+```{r}
+jags.burn2 <- window(jags.out,start=6000) # does not reach 5000 effective sample size because of                                            time and device constraints
+plot(jags.burn2)
+summary(jags.burn2)
+```
+
+
+```{r}
+jags.mat <- as.matrix(jags.burn2)
+sel.a <- grep("alpha",colnames(jags.mat))
+plot(jags.burn2[,sel.a])
+summary(jags.burn2[,sel.a])
+alpha <- jags.mat[,sel.a]
+alphamu <- apply(alpha,2,mean)
+```
+
+
+```{r}
+n = nrow(jags.mat)
+xpred <- seq(min(dat$time),max(dat$time),length=10)
+npred <- length(xpred)
+ypred <- matrix(NA,nrow=n,ncol=npred)
+ycred <- matrix(NA,nrow=n,ncol=npred)
+
+for(g in 1:n){
+  Ey <- jags.mat[g,"mu"] 
+  Ey2 <- Ey + alpha[g,]  # (alphamu[g, alphamu%%10])
+  ycred[g,] <- Ey2
+  ypred[g,] <- rnorm(npred, Ey2, sqrt(1/jags.mat[g,"S"]))
+}
+ci <- apply(ycred,2,quantile,c(0.025,0.5,0.975))
+pi <- apply(ypred,2,quantile,c(0.025,0.975))
+
+plot(dat$time,dat$density, ylim = c(6,9))
+lines(xpred,ci[2,],col=2,lwd=2)  ## median model
+lines(xpred,ci[1,],col=2,lty=1) ## model CI
+lines(xpred,ci[3,],col=2,lty=1)
+lines(xpred,pi[1,],col=3,lty=2) ## model PI
+lines(xpred,pi[2,],col=3,lty=2)
+```
+
+
+5.	Based on the posterior mean estimates from this model, approximately what percentage of the variance in the mosquito densities is explained by the year effects? Which parameters (and from which models) do you need to look at to assess this?
+
+Answer: We should look at tau and S. From MCMC result after burnin, tau.t = 16.1, S = 21.5, so % of variance explained is (1/16.1)/(1/16.1 + 1/21.5) = 57.2%.
+
+6. Extra Credit: Repeat the Task 2 analysis adding a random effect on `rep`
+
+```{r}
+model_randomtimerep <- "
+
+model{
+  mu ~ dnorm(0, 0.01)
+  S ~ dgamma(0.01,0.01)        ## prior precision
+  tau.t ~ dgamma(0.01,0.01)    ## prior on tau.t - the year-to-year variability
+  tau.r ~ dgamma(0.01,0.01)    ## the rep-to-rep variability 
+
+  for (t in 1:10) {            ## within a loop over time
+  alpha.t[t] ~ dnorm(0,tau.t)  ## random year effect parameter model
+  }
+  
+  for (r in 1:5) {
+  alpha.r[r] ~ dnorm(0,tau.r)  ## random rep effect parameter model 
+  }
+  
+  for(i in 1:n){
+	   Ex[i] <- mu + alpha.t[index[i]] + alpha.r[rep[i]]		## random year + rep effects added to process model 
+	   y[i]  ~ dnorm(Ex[i],S)		        ## data model
+  }
+}
+"
+
+data3 <- list(y = dat$density, n = length(dat$density), index = index, rep=as.numeric(as.factor(dat$rep)))
+
+j.model3 <- jags.model (file = textConnection(model_randomtimerep),
+                             data = data3,
+                             n.chains = 3)
+
+jags.out   <- coda.samples (model = j.model3,
+                            variable.names = c("mu","S", "alpha.t", "tau.t","alpha.r","tau.r"),
+                                n.iter = 10000)
+
+plot(jags.out)
+gelman.diag(jags.out)
+GBR <- gelman.plot(jags.out) 
+```
+
+```{r}
+jags.burn3 <- window(jags.out,start=5000)  
+summary(jags.burn3)
+
+jags.mat <- as.matrix(jags.burn3)
+## separating the alpha.r and alpha.t
+sel.ar <- grep("alpha.r",colnames(jags.mat))
+sel.at <- grep("alpha.t",colnames(jags.mat))
+alpha.r <- jags.mat[,sel.ar]
+alpha.t <- jags.mat[,sel.at]
+
+n = nrow(jags.mat)
+xpred <- seq(min(dat$time),max(dat$time),length=10)
+npred <- length(xpred)
+ypred <- matrix(NA,nrow=n,ncol=npred)
+ycred <- matrix(NA,nrow=n,ncol=npred)
+
+for(g in 1:n){
+  Ey <- jags.mat[g,"mu"] + alpha.t[g,] + alpha.r[g,2] # only plot the second rep
+  ycred[g,] <- Ey
+  ypred[g,] <- rnorm(npred, Ey, sqrt(1/jags.mat[g,"S"]))
+}
+ci <- apply(ycred,2,quantile,c(0.025,0.5,0.975))
+pi <- apply(ypred,2,quantile,c(0.025,0.975))
+
+plot(dat$time,dat$density, ylim = c(6, 9), col=as.numeric(dat$rep=="rep1")+1) # first rep in red
+lines(xpred,ci[2,],col=2,lwd=2)  ## median model
+lines(xpred,ci[1,],col=2,lty=1)  ## model CI
+lines(xpred,ci[3,],col=2,lty=1)
+lines(xpred,pi[1,],col=3,lty=2)  ## model PI
+lines(xpred,pi[2,],col=3,lty=2)
+```
+
+# Mixed Effects
+
+You are discussing your research with a colleague and mention that your random effects model showed that one year, 2002, had notably lower mosquito abundance.  He suggests that the driver may be exogenous and sends you a data file, `met.csv`, that contains the mean annual temperature (°C), precipitation (mm/year), and relative humidity (%) for 1995-2009 years.
+ 
+### Lab Report Task 3:
+
+6.  As an exploratory analysis of this hypothesis, plot the posterior mean of your random year effect (alpha.t) versus each of the three met variables.  Turn in figures and note which variable(s) are worth exploring further.
+
+```{r}
+dat2 <- read.csv("data/met.csv",header=TRUE,as.is = TRUE)
+dat2part <- dat2[1:10,]
+```
+
+```{r}
+plot(dat2part$precip, alphamu) # positive correlation, needs further investigation
+plot(dat2part$MAT, alphamu) # looks random
+plot(dat2part$RH, alphamu) # looks random
+```
+
+7.	Convert the random effects model to a mixed effects model by converting the mean, mu, to a linear model, `beta0 + beta1*y[i]` where y is the meteorological covariate you want to include, while keeping the random year effect.
+
+```{r}
+model_mix <- "
+model{
+
+  b ~ dmnorm(b0,Vb)  	## multivariate Normal prior on vector of regression params
+  S ~ dgamma(s1,s2)    ## prior precision
+  for (t in 1:10) {alpha.t[t] ~ dnorm(0,tau.t)}
+  tau.t ~ dgamma(0.001,0.001)
+
+  for(i in 1:n){
+	  Ex[i] <- b[1] + b[2]*x[index[i]]  + alpha.t[index[i]]
+	  y[i]  ~ dnorm(Ex[i],S)		        ## data model
+  }
+}
+"
+
+data4 <- list(x = dat2part$precip, y = dat$density, n = length(dat$density), index = index)
+
+## specify priors
+data4$b0 <- as.vector(c(0,0))      ## regression b means
+data4$Vb <- solve(diag(10000,2))   ## regression b precisions
+data4$s1 <- 0.1                    ## error prior n/2
+data4$s2 <- 0.1                    ## error prior SS/2
+
+j.model4   <- jags.model (file = textConnection(model_mix),
+                             data = data4,
+                             n.chains = 3)
+
+jags.out   <- coda.samples (model = j.model4,
+                            variable.names = c("b","S", "alpha.t","tau.t"),
+                                n.iter = 10000)
+
+plot(jags.out)
+gelman.diag(jags.out)
+GBR <- gelman.plot(jags.out) # cut first 6000
+```
+
+8.	Fit your mixed effects model and plot the model CI and PI vs the data
+
+```{r}
+jags.burn4 <- window(jags.out,start=6000) # does not reach 5000 effective sample size because of                                            time and device constraints  
+plot(jags.burn4)
+summary(jags.burn4)
+
+jags.mat <- as.matrix(jags.burn4)
+
+sel.at <- grep("alpha.t",colnames(jags.mat))
+alpha.t <- jags.mat[,sel.at]
+
+n = nrow(jags.mat)
+
+npred <- 10 
+xpred <- seq(min(dat$time),max(dat$time),length=10)
+ypred <- matrix(NA,nrow=n,ncol=npred)
+ycred <- matrix(NA,nrow=n,ncol=npred)
+
+for(g in 1:n){
+  Ey = jags.mat[g,"b[1]"] + jags.mat[g,"b[2]"]*dat2part$precip + alpha.t[g,]
+  ycred[g,] <- Ey     
+  ypred[g,] <- rnorm(npred, Ey, sqrt(1/jags.mat[g,"S"]))
+}
+
+ci <- apply(ycred,2,quantile,c(0.025,0.5,0.975), na.rm = T)
+pi <- apply(ypred,2,quantile,c(0.025,0.975), na.rm = T)
+
+#  time = 1995:2004 
+plot(dat$time,dat$density, ylim = c(6, 9))
+lines(xpred,ci[2,],col=2,lwd=2)  ## median model
+lines(xpred,ci[1,],col=2,lty=1) ## model CI
+lines(xpred,ci[3,],col=2,lty=1)
+lines(xpred,pi[1,],col=3,lty=2) ## model PI
+lines(xpred,pi[2,],col=3,lty=2)
+```
+
+9.	Create a summary table that provides the posterior parameter means and CI for all 3 models and their DIC scores.
+
+```{r}
+# Summary Table
+summary(jags.burn)
+summary(jags.burn2)
+summary(jags.burn4)
+
+DIC1 <- dic.samples(j.model1, n.iter=5000)
+DIC.GlobalMean=sum(DIC1$deviance)+sum(DIC1$penalty)
+DIC.GlobalMean
+
+DIC2 <- dic.samples(j.model2, n.iter=5000)
+DIC.RandomTime=sum(DIC2$deviance)+sum(DIC2$penalty)
+DIC.RandomTime
+
+
+DIC4 <- dic.samples(j.model4, n.iter=5000)
+DIC.mixed=sum(DIC4$deviance)+sum(DIC4$penalty)
+DIC.mixed
+
+DICtab <- data.frame(rbind(c(DIC = DIC.GlobalMean), (DIC = DIC.RandomTime), (DIC = DIC.mixed)))
+DICtab <- cbind(Models =c("Global Mean","Random Time Effect", "Mixed Effect"),DICtab)
+DICtab # mixed effect has lowest DIC
+```
+
+10.	Extra Credit: Use the best fitting model to predict the next 5 years (2005-2009) of mosquito abundance including an uncertainty estimate (predictive interval). Turn in a graph of your prediction. Hint: the easiest way to make predictions is to create new rows in your data object that has covariates but NA's for the y's.
+
+```{r}
+# Using mixed effect model
+model_prediction <- "
+model{
+
+  b ~ dmnorm(b0,Vb)  	 ## multivariate Normal prior on vector of regression params
+  S ~ dgamma(s1,s2)    ## prior precision
+  
+  for (t in 1:15) {alpha.t[t] ~ dnorm(0,tau.t)}
+  tau.t ~ dgamma(0.01,0.01)
+
+  for(i in 1:n){
+	  Ex[i] <- b[1] + b[2]*x[index[i]] + alpha.t[index[i]]  
+	  y[i]  ~ dnorm(Ex[i],S)		       
+  }
+}
+"
+
+data5 <- list(x = dat2$precip, y =c(dat$density, rep(NA, 5)), n = length(dat$density) + 5, index = c(index, 11:15))
+
+## specify priors
+data5$b0 <- as.vector(c(0,0))      ## regression b means
+data5$Vb <- solve(diag(10000,2))   ## regression b precisions
+data5$s1 <- 0.1                    ## error prior n/2
+data5$s2 <- 0.1                    ## error prior SS/2
+
+j.model5   <- jags.model (file = textConnection(model_prediction),
+                             data = data5,
+                             n.chains = 3)
+
+jags.out   <- coda.samples (model = j.model5,
+                            variable.names = c("b","S", "alpha.t","tau.t"),
+                                n.iter = 10000)
+
+plot(jags.out)
+gelman.diag(jags.out)
+GBR <- gelman.plot(jags.out) # cut first 6000
+```
+
+```{r}
+jags.burn5 <- window(jags.out,start=6000) # does not reach 5000 effective sample size because of                                            time and device constraints  
+plot(jags.burn5)
+summary(jags.burn5)
+
+jags.mat <- as.matrix(jags.burn5)
+
+sel.at <- grep("alpha.t",colnames(jags.mat))
+alpha.t <- jags.mat[,sel.at]
+
+n = nrow(jags.mat)
+
+npred <- 15 
+xpred <- seq(min(dat2$year),max(dat2$year),length=15)
+ypred <- matrix(NA,nrow=n,ncol=npred)
+ycred <- matrix(NA,nrow=n,ncol=npred)
+
+for(g in 1:n){
+  Ey = jags.mat[g,"b[1]"] + jags.mat[g,"b[2]"]*dat2$precip + alpha.t[g,]
+  ycred[g,] <- Ey     
+  ypred[g,] <- rnorm(npred, Ey, sqrt(1/jags.mat[g,"S"]))
+}
+
+ci <- apply(ycred,2,quantile,c(0.025,0.5,0.975), na.rm = T)
+pi <- apply(ypred,2,quantile,c(0.025,0.975), na.rm = T)
+```
+
+```{r}
+#  time = 1995-2009
+plot(dat$time,dat$density, ylim = c(6, 9), xlim=c(1995,2009))
+lines(xpred,ci[2,],col=2,lwd=2)  ## median model
+lines(xpred,ci[1,],col=2,lty=1) ## model CI
+lines(xpred,ci[3,],col=2,lty=1)
+lines(xpred,pi[1,],col=3,lty=2) ## model PI
+lines(xpred,pi[2,],col=3,lty=2)
+```
+

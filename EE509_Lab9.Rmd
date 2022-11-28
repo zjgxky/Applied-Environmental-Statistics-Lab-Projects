@@ -1,0 +1,380 @@
+---
+title: "Lab 09: Linear Model Extentions"
+author: "GE 509"
+output: html_document
+---
+
+The objective of this lab is to apply the techniques we have been learning about ways to relax the assumptions of linear models and to gain additional practice with Likelihood and Bayesian models of progressively greater complexity.  Specifically, we will start from a **Generalized Linear Models** framework, and then additionally consider techniques for dealing with **'errors in variables'** and **missing data**.
+
+## Case Study:  Seedling Recruitment and Soil Moisture
+
+In this analysis we'll consider the relationship between soil moisture and seedling densities.  The response data (y) in this analysis consists of counts of seedlings in 1m x 1m plots.  Soil moisture was measured using Time Domain Reflectometry (TDR), a technique where two metal rods are inserted into the ground and an electrical pulse is sent down one rod and measured on the other.  The TDR technique actually measures soil impedance, not soil moisture, but soil moisture can be estimated based on empirical calibrations against gravimetric soil moisture measurements (difference between wet and dry weight of soil cores).  TDR has the advantage of being much less labor intensive and non-destructive than gravimetric measurement, which permits repeated measurements of the same plots.
+  The Poisson distribution is a natural choice for modeling the seedling count data because the data is both discrete and lacking a defined upper bound.  Since we are interested in the relationship between seedling density and a covariate, soil moisture, we'll make use of the Generalized Linear Models (GLM) framework for fitting a Poisson regression.  As a link function, lets start with the standard choice of a log link.
+ 
+$$log(\mu) = \beta_0 + \beta_1 TDR$$
+$$y \sim Pois(\mu)$$
+ 
+The data for this analysis are provided to you as a Rdata object that contains the following variables:
+
+	n – sample size
+	y – seedling counts (individuals/m2)
+	TDR – raw output from the TDR unit (arbitrary units) for each seedling plot
+	TDRc – raw TDR output for the calibration samples
+	SMc – Volumetric soil moisture measurements for the calibration samples (m3/m3)
+	SMseq – a sequence of soil moisture values used for prediction
+
+```{r}
+load("data/Lab9.RData")
+```
+
+For the first part of this analysis we will use the TDR measurements as our covariate.  We will deal with the calibration issue later in the lab.
+
+## Maximum Likelihood Poisson Regression
+
+To begin, we will look at the analysis from a Likelihood perspective.  As a reminder from lecture, the Likelihood analysis could be performed two ways in R.  The first would be to use the “glm” function
+
+```{r}
+PR1 = glm(y ~ TDR, family=poisson(link="log"))
+PR1
+```
+
+The second approach would be to define the negative log likelihood function yourself and then use a nonlinear optimization function (e.g. nlm, optim) to find the MLE
+ 
+```{r}
+ic   <- c(0,0) ## initial guess
+LnL  <- function(beta){  ## define likelihood
+  -sum(dpois(y,exp(beta[1] + beta[2]*TDR),log=TRUE))
+}
+test <- LnL(ic) ## verify likelihood function works
+PR2  <- nlm(LnL,ic) ## maximize the likelihood
+PR2
+```
+
+### Lab Report Task 1
+
+1.  Plot seedling densities as a function of TDR
+2.	Add regression line to the plot
+  Hint 1: use “coef” to extract the regression coefficients from the GLM.
+  Hint 2: don't forget about the link function when plotting the line
+3.	Briefly _describe_ how you would add model confidence and predictive intervals to these curves
+4.	What would be an appropriate null model to compare to?  What metric would you use to compare the two models?
+5.	Plot the calibration data of TDR vs. soil moisture.  Fit a Normal regression model to the calibration data, add the line to the plot, and report the summary table information for the fit
+
+```{r}
+# 1.
+plot(TDR, y)
+
+# 2.
+coef.count <- PR1$coef
+xseq <- seq(min(TDR), max(TDR), length=150)
+lines(xseq, exp(coef.count[1] + coef.count[2]*xseq))
+
+# 3.
+# Using bootstrap to resample the original dataset, fit parameters to resample via MLE and repeat procedure n times. 
+# Estimate parameter CI based on sample quantiles  
+# Estimate parameter PI based on sample quantiles using rpois
+
+# 4.
+# Linear model without using glm. Using LRT and AIC to compare.
+
+# 5.
+plot(TDRc, SMc)
+lm1 <- lm(SMc ~ TDRc)
+abline(lm1)
+summary(lm1)
+```
+
+
+## Bayesian Poisson Regression
+
+Next we're going to fit the Poisson regression model from the Bayesian perspective using BUGS.  This will allow you to compare the Likelihood and Bayesian approaches and will serve as the foundation for building a more complex model.  
+
+To build the Poisson model:
+
+* Start from the 'univariate_regression' model from Lab 6
+
+* Drop the prior on _prec_ -- the Pois has no variance/precision parameter
+
+* Modify the process model to be:
+```
+    log(mu[i]) <- beta[1]+beta[2]*TDR[i]     ## process model
+```
+Normally JAGS doesn't let functions be on the left-hand side of an <- but the _log_ and _logit_ link functions are two important exceptions.
+
+* Modify the data model to be _dpois_
+
+ 
+### Lab Report Task 2: 
+
+6.  Fit the Bayesian Poisson regression model. Provide the DIC, and summary table & posterior density plots for all model parameters.  Report the burn in and effective MCMC sample size (You should still be making diagnostic plots but you no longer need to include them).
+7.	Compare the parameters from the Bayesian fit to the Likelihood fit.  Make sure to identify which terms match with which between the models.
+8.	Plot the model credible interval and predictive interval.  Be sure to include the scatterplot of the observed data.
+9.	How well does the Poisson model match the data?  Does 95% of the data fall within the 95% PI?
+
+```{r}
+# 6.
+library(rjags)
+library(coda)
+
+univariate_regression <- "
+model{
+  b ~ dmnorm(b0,Vb)  	## multivariate Normal prior on vector of regression params
+
+  for(i in 1:n){
+	  log(mu[i]) <- b[1] + b[2]*TDR[i]   	## process model
+	  y[i] ~ dpois(mu[i])		        ## data model
+  }
+}
+"
+
+data <- list(TDR = TDR, y = y, n = length(y))
+
+data$b0 <- as.vector(c(0,0))      ## regression b means
+data$Vb <- solve(diag(10000,2))   ## regression b precisions
+
+j.model   <- jags.model (file = textConnection(univariate_regression),
+                             data = data,
+                             n.chains = 3)
+
+jags.out   <- coda.samples (model = j.model,
+                            variable.names = c("b"),
+                                n.iter = 5000)
+
+DIC1 <- dic.samples(j.model, n.iter=5000)
+DIC1
+DIC <- sum(DIC1$dev + DIC1$pen)
+DIC
+
+plot(jags.out)
+
+GBR <- gelman.plot(jags.out)
+
+burnin = 1000                             ## 1000 because falls below 1.05 after 1000 samples
+jags.burn <- window(jags.out,start=burnin)  
+plot(jags.burn)                           
+
+effectiveSize(jags.burn) # effective size small because large lags in autocorrelation, so requiring many more samples to get to 5000.
+summary(jags.burn)
+```
+
+```{r}
+# 7. 
+# In Bayesian, b[1] is 0.5995, b[2] is 3.2820;
+# In frequentist, b[1] is 0.5994118, b[2] is 3.2861821, so they are similar
+
+# 8.
+out <- as.matrix(jags.burn)
+n = nrow(out)
+xpred <- seq(0,10,length=50)
+npred <- length(xpred)
+ypred <- matrix(NA,nrow=n,ncol=npred)
+ycred <- matrix(NA,nrow=n,ncol=npred)
+
+for(g in 1:n){
+  Ey <- exp(out[g,"b[1]"] + out[g,"b[2]"] * xpred)
+  ycred[g,] <- Ey
+  ypred[g,] <- rpois(npred,Ey)
+}
+ci <- apply(ycred,2,quantile,c(0.025,0.5,0.975))
+pi <- apply(ypred,2,quantile,c(0.025,0.975))
+
+plot(TDR, y)
+lines(xpred,ci[2,],col=2,lwd=2)  ## median model
+lines(xpred,ci[1,],col=2,lty=1) ## model CI
+lines(xpred,ci[3,],col=2,lty=1)
+lines(xpred,pi[1,],col=3,lty=2) ## model PI
+lines(xpred,pi[2,],col=3,lty=2)
+
+# 9.
+# Poisson model capture the trend but less than 95% data fall within the PI. Therefore, poisson model may not be the good one.
+```
+
+## Missing Data
+
+It is not uncommon in the real world for a small percentage of data to be missing due to any of a multitude of real-world mistakes. In many cases it is simple enough to 'drop' these data, as is the norm in classical analyses. However there are cases where this is undesirable, such as when one has a large number of covariates and you are only missing one and don't want to drop the whole row, or when individual measurements are very expensive in time or money or are otherwise irreplaceable.  From the Bayesian perspective it is possible to formally accommodate missing data by [numerically] integrating over all possible states the data can take on.  This technique is sometime referred to as imputing the missing data, or more specifically as multiple imputation because we are proposing many values the data could have been.  Doing this (not surprisingly) requires that we specify a prior distribution on the missing data itself.  However, the inference will draw on the likelihood, the other covariates, and the response data in order to formally generate the posterior distribution of the missing data. Therefore, it is the posterior that we actually using 'fill in' the missing data, not the prior.  Finally, it bears mentioning that addressing missing data requires that we meet one very important assumtion – that the data is missing at random.  If the process that caused the data to be missing is systematic or in any way related to the process we're trying to understand then we cannot impute the missing data.
+
+To show how this works:
+
+* Make a copy of your full 'data' list and then randomly change one of the TDR values to NA to make it 'missing'. Make sure to record the value before removing it.
+
+* Make a copy of your JAGS script and add a prior on the missing value. For example, if you removed the 12th TDR measurement you could put a prior on TDR[12] (e.g. a uniform over the range of valid data).
+
+* Re-run the model using this data, but this time add the TDR value you removed to the variables that you track (e.g. TDR[12]) so that we can view the posterior distribution.
+
+### Lab Report Task 3: 
+10.  Report the posterior distributions of the missing TDR data.  How does this compare to the prior your specified and to the true value? 
+
+```{r}
+# 10.
+missing_data <- "
+model{
+  b ~ dmnorm(b0,Vb)  	## multivariate Normal prior on vector of regression params
+  TDR2[remove_index] ~ dunif(0,1)
+  
+  for(i in 1:n){
+	  log(mu[i]) <- b[1] + b[2]*TDR2[i]   	## process model
+	  y2[i] ~ dpois(mu[i])		        ## data model
+  }
+}
+"
+
+TDR2 <- TDR
+y2 <- y
+remove_index <- floor(runif(1, min=1, max=100)) # randomly generate the index of missing value
+remove_data <- TDR2[remove_index]
+TDR2[remove_index] <- NA
+data2 <- list(TDR2 = TDR2, y2 = y2, n = length(y2), remove_index = remove_index)
+
+data2$b0 <- as.vector(c(0,0))      
+data2$Vb <- solve(diag(10000,2))   
+
+j.model   <- jags.model (file = textConnection(missing_data),
+                             data = data2,
+                             n.chains = 3)
+
+jags.out   <- coda.samples (model = j.model,
+                            variable.names = c("b" , "TDR2"), # Sorry that I give the posteriors of all the x, and it is annoying. I face problems if putting TDR2[remove_index] here.
+                                n.iter = 5000)
+plot(jags.out)
+
+summary(jags.out)
+
+remove_data # True Value
+# If randomly picked index is 86, the posterior mean is 0.344, which is inside my prior U(0,1); the true removed data is 0.10, which is far away from what MLE produced, but this can happen.
+```
+
+
+### Poisson Regression with Errors in Variables
+
+Note: the first two models presented below are for explanation and you don't have to run them
+
+One obvious problem with the analyses conducted so far is that the covariate has been our proxy data, TDR, which has arbitrary units and is not biologically interesting -- there are no noteworthy theories in biology about the effect of soil impedance on plants.  What we are really interested in is the impact of soil moisture on our plants, but we never observe soil moisture directly – it is a latent variable.  However, we do have a calibration curve that can be used to relate TDR to soil moisture.  By far the most common approach in the literature to calibration problems such as this one is to use just only the deterministic process model for the relationship between the two variables in order to transform one variable to another.  However, the relationship is not perfect and therefore there is uncertainty in the soil moisture estimates.  A full treatment of uncertainty would account for the fact that there is both parameter uncertainty in the calibration curve and residual error in the data model – in other words we want to know the posterior predictive distribution of each soil moisture estimate given the observed TDR measurement.  If we knew this we could then use these posterior distributions as informative priors on our data model for the Errors in Variables model we talked about in lecture.  If we wanted to fit the calibration curve in JAGS it would just be the simple linear regression model we've seen a number of times already
+ 
+```
+model {
+  for(i in 1:2) { alpha[i] ~ dnorm(0,0.001)}        ## priors
+  sigma ~ dgamma(0.01,0.01)
+  for(i in 1:10){
+            ESMc[i] <- alpha[1]+alpha[2]*TDRc[i]    ## process model: Expected SMc
+            SMc[i] ~ dnorm(ESMc[i],sigma)           ## data model: Soil Moisture calibration
+   }
+}
+```
+
+The Poisson regression model would then be modified based on the errors in variable approach to account for the uncertainty in soil moisture due to the fact that TDR is an imperfect proxy.
+ 
+```
+model {
+  alpha ~ dmnorm(abar,aprec)}                            ## informative prior, calibration process
+  sigma ~ dgamma(s1,s2)                                  ## informative prior, calibration precision
+  for(i in 1:2) { beta[i] ~ dnorm(0,0.001)}              ## Poisson regression priors
+  
+  for(i in 1:n){
+    ESM[i] <-  alpha[1] + alpha[2]*TDR[i]                ## Errors in variables - process model
+    SM[i] ~ dnorm(ESM[i],sigma)                          ## Errors in variables - data model
+    log(mu[i]) <- beta[1]+beta[2]*SM[i]                  ## Poisson regression - process model
+    y[i] ~ dpois(mu[i])  		                             ## Poisson Regression – data model
+  }
+}
+```
+
+Writing the combined model (below) involves little more than putting the code for each of these two models into one file
+
+```{r}
+PoisRegPlusCalib = "
+model {
+  ### TDR calibration curve
+  alpha[1] ~ dnorm(0,100)   ## calibration priors
+  alpha[2] ~ dlnorm(0.01,1)  # cannot be negative
+  sigma ~ dgamma(0.1,0.1)
+  for(i in 1:10){
+    ESMc[i] <- alpha[1] + alpha[2]*TDRc[i]   ## expected soil moisture, calibration process model
+    SMc[i] ~ dnorm (ESMc[i],sigma)  	         ## calibration data model
+  }
+  
+  ## Seedling Density vs Soil Moisture
+  for(i in 1:2) { beta[i] ~ dnorm(0,0.001)}   ## Poisson regression priors
+  
+  for(i in 1:n){
+    ESM[i] <-  alpha[1] + alpha[2]*TDR[i]     ## Errors in Variables – process model
+    SM[i] ~ dnorm(ESM[i],sigma)               ## Errors in Variables – data model
+    log(mu[i]) <- beta[1]+beta[2]*SM[i]       ## Poisson Regression – process model
+    y[i] ~ dpois(mu[i])                       ## Poisson Regression – data model
+  }
+}
+"
+```
+
+
+While this model looks larger and more complicated that most we've looked at in JAGS, it really just consists of a number of simple parts we've seen before.  
+
+The first part is the fitting of the calibration curve.  
+The second part involves using the calibration curve to estimate soil moisture and then fitting the Poisson regression of seedling density vs soil moisture.  Unlike the conventional approach of performing each step sequentially, this approach propagates the error in each step into the final model.
+	Reminder: you may want to specify initial conditions on the model parameters.  It is perfectly valid to use the previous estimates (e.g. Task 1) for the initial conditions.  For example, if I wanted to initialize alpha to all 0's and sigma to 5 I would specify list(alpha=c(0,0),sigma(5))
+ 
+### Lab Report Task 4: 
+
+11. Fit the final combined calibration/Poisson regression model and provide a summary table and posterior density plots for the model parameters.  Also report the burn in and the effective MCMC sample size.
+12. Plot the model credible interval and predictive interval.  Extra Credit: Include the scatterplot of the data on the plot, using the posterior CIs for all the latent _SM_ variables as the x.
+13.	How does this fit compare to the previous Poisson regression of seedlings vs TDR in terms of the overall uncertainty in the model (width of credible and predictive intervals)?  In qualitative terms, to what degree does ignoring the uncertainty in the TDR/Soil Moisture relationship affect the uncertainty in our parameter estimates and our confidence in our model?
+
+```{r}
+# 11.
+data3 <- list(TDR = TDR, y = y, TDRc = TDRc, SMc = SMc, n = length(y))
+
+inits <- list()
+for(i in 1:3){
+  inits[[i]] <- list(sigma = 0.1, alpha = c(0.1, 0.5), beta = c(0.58, 3.30))
+}
+
+j.model   <- jags.model (file = textConnection(PoisRegPlusCalib),
+                             data = data3,
+                             inits = inits,
+                             n.chains = 3)
+
+jags.out   <- coda.samples (model = j.model,
+                            variable.names = c("alpha[1]", "alpha[2]", "sigma", "beta"),
+                                n.iter = 10000)
+
+plot(jags.out)
+gelman.diag(jags.out)
+GBR <- gelman.plot(jags.out)
+
+summary(jags.out)
+```
+
+```{r}
+burnin_new = 2000
+jags.burn <- window(jags.out,start=burnin_new)
+plot(jags.burn) 
+effectiveSize(jags.burn) # a few hundreds, this suggsts much more samples needed to get 5000 effective ones.
+summary(jags.burn)
+
+# 12.
+out <- as.matrix(jags.burn)
+ngibbs = nrow(out)
+xpred <- seq(0,10,length=1000)
+npred <- length(xpred)
+ypred <- matrix(NA,nrow=ngibbs,ncol=npred)
+ycred <- matrix(NA,nrow=ngibbs,ncol=npred)
+
+for(g in 1:ngibbs){
+  Ey <- exp(out[g,"beta[1]"] + out[g,"beta[2]"] * xpred) ## expected value of y
+  ycred[g,] <- Ey
+  ypred[g,] <- rpois(npred,Ey)
+}
+
+ci <- apply(ycred,2,quantile,c(0.025,0.5,0.975),na.rm=T)
+pi <- apply(ypred,2,quantile,c(0.025,0.975),na.rm=T)
+
+plot(TDR, y)
+lines(xpred,ci[2,],col=2,lwd=2)  ## median model
+lines(xpred,ci[1,],col=2,lty=1) ## model CI
+lines(xpred,ci[3,],col=2,lty=1)
+lines(xpred,pi[1,],col=3,lty=2) ## model PI
+lines(xpred,pi[2,],col=3,lty=2)
+
+# 13.
+# CI and PI here are much wider, which means higher uncertainty after considering uncertainty in x. Therefore, if errors in x is ignored, we would get overconfident result (both parameters and model).
+```
+

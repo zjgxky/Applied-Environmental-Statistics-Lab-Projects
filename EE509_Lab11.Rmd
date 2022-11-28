@@ -1,0 +1,365 @@
+---
+title: 'Exercise 11: State Space'
+author: "EE 509"
+output: html_document
+---
+ 
+The objective of this lab is to explore state-space time-series models.  State-space models are a flexible framework that treats the true time-series as a latent variable, which separates the process model (which describes the transition from one time to the next) and the data model (which describes the observation error).  
+This separation allows us to treat the observed data for each time as conditionally independent from every other observation given the underlying latent state variable.  This separation also allows us to model the data and process on different time scales and to easily accommodate missing data or irregular sampling, which is difficult in traditional time-series models.  
+The basic state-space framework presented here is easily extensible to multiple data sets, multiple interacting time series, and more complex (e.g. multivariate) process models.
+
+##Case Study:  Bialowieza moose
+
+In this lab we will be working with data on the observed density of moose (Alces alces) in the Bialowieza Primeval Forest, which straddles the border of Poland and Belarus (Jedrzejewska et al 1997).  Our data consists of annual censuses collected by a combination of snow tracking, hunting, drive censuses, and counts at baiting sites.  Data have been corrected for known biases but some amount of observation error likely remains.  The data set is fairly long by ecological standards—a 48-year data set spanning 1946-1993—however, there are gaps of missing data from 1963-1966 and in 1989.  Data are available in the text file “alcesdata.txt”.  For further information, this analysis closely mirrors the example from Clark and Bjornstad (2004).
+
+In this lab we will confront this data with the two simplest discrete-time population models in ecology, exponential growth and logistic growth.  
+"By comparing these two models we will be able to determine whether the growth of this population is density-dependent or density-independent."
+We will also be able to estimate the intrinsic rate of population growth and the carrying capacity for the species, both of which are important for management and for understanding the basic biology of the species.  
+Finally, we will be able to partition the variability in the time-series into observation error vs. process error, which in this case is the inter-annual variability in population growth.  
+
+Knowing the inter-annual variability in population growth helps us understand to what extent population dynamics are driven by internal biological factors (autogenic) vs. external environmental factors (exogenous).  While we cannot attribute all of the residual process variance to exogenous factors because there are always biotic interactions that are not accounted for, a large amount of process error is often suggestive of environmental factors.
+
+The two process models we will use for this lab are the discrete-time exponential growth model
+
+$$N_{t+1} = N_t e^{r+\epsilon_t}$$
+
+and the Ricker model, which is the discrete-time equivalent to logistic growth
+ 
+$$N_{t+1} = N_t e^{r (1 - N_t / K) + \epsilon_t}$$
+
+In both models, $N_t$ is the population density at time t, and r is the population growth rate (per-capita in/decrease in population from time t to time t+1).  Finally, for both models we will assume that the process error, $\epsilon_t$, is normally distributed and multiplicative:
+
+$$\epsilon_t \sim N(0,\sigma^2)$$
+ 
+If we take the log of both sides and express the process model in terms of $X = ln(N)$, the two models then become:
+
+$$X_{t+1} = X_t + r + \epsilon_t$$ Exponential
+
+$$X_{t+1} = X_t + r(1-N_t/K) + \epsilon_t$$ Ricker
+
+Next, lets assume that the observation error on the population densities is lognormally distributed.  This is a sensible choice because we know that the observed population density is bound at 0 (we can't have negative densities), and can reasonably expect the absolute error to increase with population density.  If we define $Y = ln(observed density)$ then this is equivalent to saying that Y has Normal error with a mean of X:
+ 
+$$Y_t \sim N(X_t,\tau^2)$$
+
+![Figure 1](images/Lab10.1.jpg)
+
+Figure 1:  Graph representation of the state space model (priors not shown).  Under parameters, b represents the process model coefficients (r for the exponential, r and K for the Ricker), $\tau^2$ is the observation error, and $\sigma^2$ is the process error..  As defined above, X and Y are the latent “true” density and the observed values, respectively. The letters A, B, and C indicate the three terms that contribute to the posterior for Xt.  
+
+Finally, we will want to specify priors for the model parameters:
+
+$$r \sim N(r_0,V_r)$$ 			## prior in intrinsic growth rate
+
+$$K \sim LN(K_0,V_k)$$ 		  ## prior on carrying capacity
+
+$$\tau^2 \sim IG(t1,t2)$$   ## prior on PROCESS variance
+
+$$\sigma^2 \sim IG(s1,s2)$$ 		## prior on Observation error
+
+$$X_1 \sim N(\mu_0,V_0)$$ 	## prior on initial time point
+
+The implementation of this model in JAGS is fairly straightforward, and thus the specification of the data model (observation error) and the priors are left to you.  The process model is not complex either:
+
+```
+ ### Process model for exponential growth
+  for(t in 2:N) {
+    mu[t] <- x[t-1] + r
+    x[t] ~ dnorm(mu[t],sigma)
+  }
+```
+
+In this code you will notice a few things that differ slightly from models you've implemented in the past.  First is that there is error, $\sigma$, in the process model itself. This part is more familiar if you realize the same model could easily be rewritten as having a random effect on r. 
+
+Second is that in the process model, the calculation of the X for the current time step depends upon the previous time step, which occurs because our process model describes the change in the state from one time step to the next.  Because of this you will note that there is one “trick” to the state-space model that has to do with the indexing of the variables.  While there are n datapoints, and thus up to n comparisons between the latent X and the observations Y, there are only n-1 transitions between time steps.  This means that the process model only shows up n-1 times (and thus is indexed from 2 to N instead of 1 to N). If we had looped starting from 1 this would have caused a reference to X[0], which doesn't exist. By contrast, the data model shows up n times and thus should be indexed from 1 to N in a *different loop* from the process model. You'll also note that in the list of priors, in addition to putting priors on sigma and tau we need to put a prior on this first time point, X[1], which falls outside the process model loop.
+
+The second major difference in the state-space model is in how the CI is generated. Up to now we've been using the modeled parameters to simulate the CI/PI after the fact. Here, since the latent variable X is inferred as part of the model, you'll want to make sure that's part of the JAGS output and then use that latent X estimate itself to draw your CI. As in the last lab, `grep` can be handy for finding the columns in the output that contain X. That said, because the Y_t is used to estimate the X_t, you'll find that even a model with no process (e.g. random walk) will generate a predicted (X_t) vs observed (Y_t) plot that looks pretty good. In practice, a more useful assessment of a state space model's performance is to perform a one-step-ahead prediction (or, more generally, n-step-ahead prediction). Like with our previous model CI/PI, these predictive diagnositics *are* frequently generated after the fact in R.
+
+Another thing that is different in this lab from what you have done before is the presence of NA values in the data.  The NA character is used to indicate missing data, and both R and JAGS are capable of handling this.  Since these values are missing from the observation model linking the latent variable, X, to the observation, Y, JAGS will automatically generate predictive estimates for them.  Make sure to specify Y as one of your tracked variables if you want to assess the predicted values!
+
+Finally, unlike many of your previous labs that converge quickly and are insensitive to the choice of prior and initial conditions, you will want to give thought to both the priors and initial conditions on parameters and **state variables** in this lab otherwise your chains may not converge over any reasonable timescale.  Also remember that initial conditions can (and in many cases should) be chosen based on the data, but priors can't just be 'tuned' to give the 'right' answer (i.e. clamping down on a prior without reference to external information is not the correct way to solve convergence problems). In particular, it can be very helpful to **initialize the the latent X's** at values near or at the observed Y's.
+ 
+## Lab Report Tasks
+
+Lab Report Task 1
+
+1.  Write out and run the JAGS code for the exponential growth model.  Include the JAGS code and standard MCMC diagnostics in your lab report.  Also include the following plots:
+a) Plots of the time series data on both the LOG and LINEAR scales that include the model mean and credible intervals. Note: the linear scale plots are just a transform of the outputs from the log-scale model, NOT a different model. Also remember that because of Jensen's inequality you shouldn't transform the summary statistics, but you CAN transform the MCMC samples themselves
+b) Density plots for the predicted values for the missing data. Note: make sure to track these variables as part of your coda.samples variable list.
+c) Density plots of the intrinsic growth rate, the observation error variance, and the process model error variance
+
+```{r}
+library(rjags)
+library(coda)
+
+alces <- read.table("/Users/xukaiyan/Desktop/EE509/alcesdata.txt", header = T)
+attach(alces)
+```
+
+```{r}
+model_exp <- "
+model{
+  x[1] ~ dnorm(0,0.01)
+  r ~ dnorm(0, 0.01)
+  sigma ~ dgamma(0.01,0.01)    
+  tau ~ dgamma(0.01,0.01)
+  
+  # process model
+  for(t in 2:n) {
+    mu[t] <- x[t-1] + r   
+    x[t] ~ dnorm(mu[t],sigma)
+  }
+
+  # data model
+  for(t in 1:n){
+	  y[t]  ~ dnorm(x[t],tau)		       
+  }
+}
+"
+
+data1 <- list(y = log(density), n = length(density))
+
+j.model1   <- jags.model (file = textConnection(model_exp),
+                             data = data1,
+                             n.chains = 3)
+
+jags.out1   <- coda.samples (model = j.model1,
+                            variable.names = c("r", "sigma", "tau", "x", "y"),
+                                n.iter = 5000)
+
+# plot(jags.out1)
+GBR <- gelman.plot(jags.out1[,c("r", "sigma", "tau", "y[18]","y[19]","y[20]","y[21]","y[44]")]) 
+```
+
+```{r}
+jags.burn1 <- window(jags.out1,start=1000) # low shrink factor initially, still cut first 1000
+effectiveSize(jags.burn1) # most <4000, some >4000 but did not run for time
+# plot(jags.burn1)  
+summary(jags.burn1)
+```
+
+```{r}
+jags.mat <- as.matrix(jags.burn1)
+sel.x <- grep("x",colnames(jags.mat))
+x <- jags.mat[,sel.x]
+
+# n = nrow(jags.mat)
+# xpred <- seq(min(year),max(year),length = max(year) - min(year) + 1)
+# npred <- length(xpred)
+# ypred <- matrix(NA,nrow=n,ncol=npred)
+# ycred <- matrix(NA,nrow=n,ncol=npred)
+
+
+# for(g in 1:n){
+#   Ey <- exp(x[g,] + jags.mat[g,"r"])
+#   ycred[g,] <- Ey
+# }
+
+ci.log <- apply(x,2,quantile,c(0.025,0.5,0.975),na.rm=T)
+ci.lin <- apply(exp(x), 2, quantile, c(0.025,0.5,0.975),na.rm=T)
+
+plot(year, log(density))
+lines(year,ci.log[2,],col=2,lwd=2)  ## median model
+lines(year,ci.log[1,],col=2,lty=1) ## model CI
+lines(year,ci.log[3,],col=2,lty=1)
+
+plot(year, density)
+lines(year,ci.lin[2,],col=2,lwd=2)  ## median model
+lines(year,ci.lin[1,],col=2,lty=1) ## model CI
+lines(year,ci.lin[3,],col=2,lty=1)
+```
+
+2.	Modify the exponential growth process model in the JAGS code to instead be the Ricker growth model.  Rerun including your JAGS code and the same figures as in part 1 plus plots for both the prior and posterior density on the carrying capacity.
+Hint: when implementing the Ricker model, don't forget that N and X are on different scales.
+
+```{r}
+model_ricker <- "
+model{
+  x[1] ~ dnorm(0,0.01)
+  r ~ dnorm(0, 0.01)
+  sigma ~ dgamma(0.01,0.01)    
+  tau ~ dgamma(0.01,0.01)
+  K ~ dlnorm(2,2)
+  
+  # process model
+  for(t in 2:n) {
+    mu[t] <- x[t-1] + r*(1-exp(x[t-1])/K)   
+    x[t] ~ dnorm(mu[t],sigma)
+  }
+
+  # data model
+  for(t in 1:n){
+	  y[t]  ~ dnorm(x[t],tau)		       
+  }
+}
+"
+
+data2 <- list(y = log(density), n = length(density))
+
+inits <- list()
+for(i in 1:3){
+  inits[[i]] <- list(sigma = 15, tau = 80, r = 0.1, x = log(density), K = 100)
+}
+
+j.model2   <- jags.model (file = textConnection(model_ricker),
+                             data = data2,
+                             inits = inits,
+                             n.chains = 3)
+
+jags.out2   <- coda.samples (model = j.model2,
+                            variable.names = c("r", "sigma", "tau", "x", "K", "y"),
+                                n.iter = 5000)
+
+
+plot(jags.out2[,c("r", "sigma", "tau", "K","y[18]","y[19]","y[20]","y[21]","y[44]")])
+GBR <- gelman.plot(jags.out2[,c("r", "sigma", "tau", "K", "y[18]","y[19]","y[20]","y[21]","y[44]")]) # cut first 1000
+```
+
+```{r}
+# prior K
+k <- seq(0,10,by=0.01)
+plot(k,dlnorm(k,2,1/sqrt(2)),type='l',xlim=c(0,10),main="prior density of K")
+```
+
+```{r}
+jags.burn2 <- window(jags.out2, start=1000) # low shrink factor initially, still cut first 1000
+# plot(jags.burn2)
+effectiveSize(jags.burn2) # not enough size, but did not run due to time
+summary(jags.burn2)
+```
+
+```{r}
+jags.mat2 <- as.matrix(jags.burn2)
+sel.x <- grep("x",colnames(jags.mat2))
+x <- jags.mat2[,sel.x]
+
+# n = nrow(jags.mat2)
+# xpred2 <- seq(min(year),max(year),length=max(year) - min(year) + 1)
+# npred2 <- length(xpred2)
+# ypred2 <- matrix(NA,nrow=n,ncol=npred2)
+# ycred2 <- matrix(NA,nrow=n,ncol=npred2)
+
+
+# for(g in 1:n){
+#   Ey <- exp(x[g,] + jags.mat2[g,"r"]*(1-exp(x[g,])/jags.mat2[g,"K"]))
+#   ycred2[g,] <- Ey
+# }
+
+ci.log2 <- apply(x,2,quantile,c(0.025,0.5,0.975),na.rm=T)
+ci.lin2 <- apply(exp(x), 2, quantile, c(0.025,0.5,0.975),na.rm=T)
+
+plot(year, log(density))
+lines(year,ci.log2[2,],col=2,lwd=2)  ## median model
+lines(year,ci.log2[1,],col=2,lty=1) ## model CI
+lines(year,ci.log2[3,],col=2,lty=1)
+
+plot(year, density)
+lines(year,ci.lin2[2,],col=2,lwd=2)  ## median model
+lines(year,ci.lin2[1,],col=2,lty=1) ## model CI
+lines(year,ci.lin2[3,],col=2,lty=1)
+```
+
+3.	Construct a summary table that includes the parameters in both models, their 95% CI, and model selection scores (your choice between DIC, WAIC, or predictive loss).
+
+```{r}
+summary(jags.burn1)
+summary(jags.burn2)
+DIC1 <- dic.samples(j.model1, n.iter=5000)
+DIC.exp=sum(DIC1$deviance)+sum(DIC1$penalty)
+DIC.exp
+
+DIC2 <- dic.samples(j.model2, n.iter=5000)
+DIC.ricker=sum(DIC2$deviance)+sum(DIC2$penalty)
+DIC.ricker
+
+# From Quantiles in Summary Table get median and CI
+DICtab <- data.frame(rbind(c(DIC = DIC.exp), (DIC = DIC.ricker)))
+DICtab <- cbind(Models =c("Exponential Model","Ricker Model"),DICtab)
+DICtab # Ricker model has lowest DIC
+```
+
+4.	Briefly give an interpretation of your results.  Be sure to comment on which model is a better fit, what you can interpret about the importance of density dependence in regulating this population, and whether the population is at its carrying capacity.	What can you infer about the relative importance of autogenic (internal) vs exogenous (external) factors in regulating this population?
+
+## Answer: Since Ricker Growth Model has a lower DIC, it is a better model. Therefore, it is important of density dependence in regulating this population. Carrying capacity is also important in predicting the growth. This leads to smaller mean deviance in Ricker Growth Model although its penalty is slightly higher.
+## Since "a large amount of process error is often suggestive of environmental factors" and in our cases process error is small, this suggests more importance of internal factors.
+
+
+5.	**Extra Credit**: An alternative to fitting this model as a time-series would have been to fit the data to the analytical solution for the model (e.g. for the exponential growth model, this would have been $N[1]*exp[r*t]$  ), which would have ignored the process varibility.  To approximate the difference in the resulting prediction, generate a time-series plot for the best fitting model (Exponential or Ricker) that contains: (1) the posterior model from your Bayesian fit (mean and CI on X), (2) the CI from the process model using the posterior parameter distributions (r, K, N[1]) but ignoring process error, (3) the observed data.  Comment on the difference between these lines, and between the lines and the data.t
+
+```{r}
+# The better model is Ricker Growth Model
+model_ricker_analytical <- "
+model{
+  N[1] ~ dnorm(0,0.01)
+  r ~ dnorm(0, 0.01)
+  tau ~ dgamma(0.01,0.01)    
+  K ~ dlnorm(2,2)
+  
+  # data model
+  for(t in 1:n){
+	  y[t]  ~ dnorm(N[t],tau)		       
+  }
+  
+  # process model
+  for(t in 2:n) {
+    N[t] <- N[t-1]*exp(r*(1-N[t-1]/K))   
+  }
+}
+"
+
+data3 <- list(y = log(density), n = length(density))
+
+# inits <- list()
+# for(i in 1:3){
+#   inits[[i]] <- list(tau = 50, r = 0.1 , K = 100)
+# }
+
+j.model3   <- jags.model (file = textConnection(model_ricker_analytical),
+                             data = data3,
+                             #inits = inits,
+                             n.chains = 3)
+
+jags.out3   <- coda.samples (model = j.model3,
+                            variable.names = c("r", "tau", "K", "y", "N"),
+                                n.iter = 5000)
+
+
+plot(jags.out3[,c("r", "tau", "K","y[18]","y[19]","y[20]","y[21]","y[44]")])
+GBR <- gelman.plot(jags.out3[,c("r", "tau", "K", "y[18]","y[19]","y[20]","y[21]","y[44]")]) # cut first 1000
+```
+```{r}
+jags.burn3 <- window(jags.out3, start=1000) # low shrink factor initially, still cut first 1000
+# plot(jags.burn2)
+effectiveSize(jags.burn3) # not enough size, but did not run due to time
+summary(jags.burn3)
+```
+
+```{r}
+jags.mat <- as.matrix(jags.burn3)
+sel.N <- grep("N",colnames(jags.mat))
+N <- jags.mat[,sel.N]
+
+n = nrow(jags.mat)
+xpred3 <- seq(min(year),max(year),length=max(year) - min(year) + 1)
+npred3 <- length(xpred3)
+ypred3 <- matrix(NA,nrow=n,ncol=npred3)
+ycred3 <- matrix(NA,nrow=n,ncol=npred3)
+
+
+for(g in 1:n){
+  Ey <- exp(N[g,]*exp(jags.mat[g,"r"]*(1-N[g,]/jags.mat[g,"K"])))
+  ycred3[g,] <- Ey
+}
+
+ci3 <- apply(ycred3,2,quantile,c(0.025,0.5,0.975),na.rm=T)
+
+plot(year, density)
+lines(xpred3,ci3[2,],col=2,lwd=2)  ## median model
+lines(xpred3,ci3[1,],col=2,lty=1) ## model CI
+lines(xpred3,ci3[3,],col=2,lty=1)
+```
+
+# Comment: The line is smoother after removing the process error because it does not catch the variability in process error. CI does not capture the varibility of points like the above model where we consider the process error.
+
+```{r}
+detach(alces)
+```
+
